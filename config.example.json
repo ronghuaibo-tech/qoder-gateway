@@ -1,0 +1,26 @@
+{
+  "listen": "127.0.0.1:8787",
+  "gateway_api_key_env": "",
+  "max_body_bytes": 8388608,
+  "qoder_patch": {
+    "enabled": true,
+    "gateway_url": "http://127.0.0.1:8787"
+  },
+  "providers": {
+    "ymeng-openai": {
+      "protocol": "openai",
+      "base_url": "https://api.ymeng.cc/v1",
+      "api_key_env": "YMENG_API_KEY",
+      "timeout_ms": 660000
+    }
+  },
+  "routes": {
+    "qoder-coding": [
+      {
+        "provider": "ymeng-openai",
+        "model": "替换为 ymeng.cc 控制台中的实际模型名",
+        "protocol": "openai-response"
+      }
+    ]
+  }
+}

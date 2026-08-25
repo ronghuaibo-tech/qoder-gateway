@@ -1,0 +1,6 @@
+{"method":"initialize","params":{"protocolVersion":"number","clientCapabilities":"object","clientInfo":"object"}}
+{"method":"session/new","params":{"cwd":"string","mcpServers":"array","_meta":"object"}}
+{"method":"session/prompt","params":{"sessionId":"string","prompt":"array","_meta":"object"}}
+{"kind":"session/update","sessionId":"string","data":{"sessionId":"string","update":{"sessionUpdate":"agent_message_chunk","content":"array"}},"_meta":{"ai-coding/request-id":"string"},"timestamp":"number"}
+{"kind":"session/update","sessionId":"string","data":{"sessionId":"string","update":{"sessionUpdate":"tool_call_update","toolCallId":"string","status":"string"}}}
+{"kind":"session/prompt","sessionId":"string","data":{"sessionId":"string","stopReason":"string"}}

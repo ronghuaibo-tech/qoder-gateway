@@ -1,0 +1,3 @@
+{"direction":"qoder-to-bridge","type":"session.prompt","request_id":"redacted","stream":true,"input":{"type":"string"},"tools":[{"type":"array"}],"workspace":{"type":"object"}}
+{"direction":"bridge-to-qoder","type":"response.output_text.delta","request_id":"redacted","delta":{"type":"string"}}
+{"direction":"bridge-to-qoder","type":"response.completed","request_id":"redacted","response":{"type":"object"}}

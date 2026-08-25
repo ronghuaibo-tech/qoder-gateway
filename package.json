@@ -1,0 +1,11 @@
+{
+  "name": "qoder-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs --config config.json",
+    "bridge": "node qoder-bridge/server.mjs",
+    "test": "node --test"
+  }
+}

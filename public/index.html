@@ -1,0 +1,799 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qoder Gateway</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a0f;
+      --panel: #0e131b;
+      --panel-2: #121924;
+      --border: #263243;
+      --text: #f4f7fb;
+      --muted: #8e9bad;
+      --green: #4ade80;
+      --green-2: #193a2a;
+      --yellow: #f5c451;
+      --red: #fb7185;
+      --blue: #78a9ff;
+      --shadow: 0 18px 45px rgba(0, 0, 0, .18);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select {
+      font: inherit;
+    }
+    button {
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #151d29;
+      color: var(--text);
+      cursor: pointer;
+      min-height: 38px;
+      padding: 0 13px;
+      transition: border-color .2s, background .2s, transform .2s;
+    }
+    button:hover { border-color: #506078; background: #1a2635; }
+    button:active { transform: translateY(1px); }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--blue);
+      outline-offset: 2px;
+    }
+    button.primary {
+      border-color: #35b866;
+      background: #248548;
+      color: #f4fff7;
+      font-weight: 700;
+    }
+    button.primary:hover { background: #2c9c54; }
+    button.ghost { background: transparent; }
+    button.danger { color: #ff9bad; }
+    input, select {
+      width: 100%;
+      min-height: 40px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #0a0f16;
+      color: var(--text);
+      padding: 0 11px;
+    }
+    input::placeholder { color: #5f6b7b; }
+    code, .mono {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    .topbar {
+      height: 68px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(7, 10, 15, .94);
+      backdrop-filter: blur(16px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 220px;
+    }
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #327d51;
+      border-radius: 8px;
+      color: var(--green);
+      background: var(--green-2);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .05em;
+    }
+    .brand strong { display: block; letter-spacing: .06em; font-size: 13px; }
+    .brand span { display: block; color: var(--muted); font-size: 11px; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--yellow);
+      box-shadow: 0 0 0 4px rgba(245, 196, 81, .10);
+    }
+    .status-dot.ok { background: var(--green); box-shadow: 0 0 0 4px rgba(74, 222, 128, .10); }
+    .status-dot.bad { background: var(--red); box-shadow: 0 0 0 4px rgba(251, 113, 133, .10); }
+    .layout {
+      display: grid;
+      grid-template-columns: 220px minmax(0, 1fr) 270px;
+      max-width: 1600px;
+      min-height: calc(100vh - 68px);
+      margin: 0 auto;
+    }
+    .sidebar, .rail {
+      padding: 30px 18px;
+      border-right: 1px solid var(--border);
+    }
+    .rail {
+      border-right: 0;
+      border-left: 1px solid var(--border);
+    }
+    .sidebar {
+      position: sticky;
+      top: 68px;
+      height: calc(100vh - 68px);
+    }
+    .nav-label, .eyebrow {
+      margin: 0 0 10px;
+      color: #6f7c8e;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    nav { display: grid; gap: 4px; }
+    nav a {
+      display: block;
+      border-radius: 6px;
+      color: var(--muted);
+      padding: 10px 11px;
+      text-decoration: none;
+    }
+    nav a:hover, nav a.active { color: var(--text); background: #151e2b; }
+    .sidebar-note {
+      position: absolute;
+      right: 18px;
+      bottom: 28px;
+      left: 18px;
+      padding-top: 16px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .content { min-width: 0; padding: 34px 34px 70px; }
+    .page-heading {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 22px;
+      margin-bottom: 26px;
+    }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 7px; font-size: clamp(25px, 3vw, 34px); letter-spacing: -.02em; }
+    h2 { margin-bottom: 5px; font-size: 16px; }
+    h3 { margin-bottom: 4px; font-size: 14px; }
+    .lede { max-width: 650px; margin-bottom: 0; color: var(--muted); }
+    .endpoint {
+      min-width: 260px;
+      padding: 12px 14px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: #0b1017;
+    }
+    .endpoint small { display: block; color: var(--muted); margin-bottom: 4px; }
+    .endpoint code { color: var(--green); font-size: 12px; }
+    .notice {
+      display: none;
+      margin-bottom: 18px;
+      padding: 11px 13px;
+      border: 1px solid #6e5720;
+      border-radius: 7px;
+      color: #f8df98;
+      background: #2a2110;
+    }
+    .notice.show { display: block; }
+    .notice.error { border-color: #6f2b3b; color: #ffb6c1; background: #281219; }
+    .overview-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .metric {
+      padding: 15px 16px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .metric-label { color: var(--muted); font-size: 12px; }
+    .metric-value { margin-top: 7px; font-size: 22px; font-weight: 750; }
+    .metric-value.green { color: var(--green); }
+    .panel {
+      margin-bottom: 18px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .panel-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 15px;
+      padding: 18px 19px;
+      border-bottom: 1px solid var(--border);
+    }
+    .panel-head p { margin-bottom: 0; color: var(--muted); font-size: 12px; }
+    .panel-body { padding: 18px 19px; }
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 15px;
+    }
+    .field { display: grid; gap: 7px; }
+    .field.full { grid-column: 1 / -1; }
+    label { color: #bbc5d3; font-size: 12px; font-weight: 650; }
+    .provider {
+      padding: 16px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--panel-2);
+    }
+    .provider + .provider { margin-top: 12px; }
+    .provider-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+    .provider-name { color: var(--green); font-weight: 750; }
+    .provider-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .provider-badge::before {
+      content: "";
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    .route-table { width: 100%; border-collapse: collapse; }
+    .route-table th {
+      color: #718095;
+      font-size: 10px;
+      letter-spacing: .10em;
+      text-align: left;
+      text-transform: uppercase;
+    }
+    .route-table th, .route-table td { padding: 10px 7px; border-bottom: 1px solid #1d2633; }
+    .route-table td:first-child, .route-table th:first-child { padding-left: 0; }
+    .route-table td:last-child, .route-table th:last-child { padding-right: 0; }
+    .route-table input, .route-table select { min-height: 36px; }
+    .empty { padding: 20px 0 4px; color: var(--muted); }
+    .rail-section { margin-bottom: 28px; }
+    .rail-title { margin-bottom: 12px; color: #c7d0dc; font-size: 12px; font-weight: 750; }
+    .rail-box {
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--panel);
+    }
+    .rail-stat { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #1d2633; }
+    .rail-stat:last-child { border-bottom: 0; }
+    .rail-stat span:first-child { color: var(--muted); }
+    .rail-stat span:last-child { color: var(--text); font-weight: 700; }
+    .provider-test { display: grid; gap: 9px; margin-top: 12px; }
+    .model-catalog { display: grid; gap: 7px; margin-top: 18px; }
+    .model-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      align-items: center;
+      gap: 12px;
+      padding: 11px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #0b1017;
+    }
+    .model-id { min-width: 0; overflow: hidden; color: #d9e5f5; text-overflow: ellipsis; white-space: nowrap; }
+    .model-family { color: var(--muted); font-size: 11px; }
+    .protocol-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+    .protocol-tag {
+      padding: 3px 6px;
+      border: 1px solid #304057;
+      border-radius: 4px;
+      color: #9eb2cc;
+      font: 10px "SFMono-Regular", Consolas, monospace;
+    }
+    pre {
+      overflow: auto;
+      max-height: 240px;
+      margin: 12px 0 0;
+      padding: 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: #b8c7da;
+      background: #080c12;
+      font: 11px/1.55 "SFMono-Regular", Consolas, monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .muted { color: var(--muted); }
+    @media (max-width: 1120px) {
+      .layout { grid-template-columns: 190px minmax(0, 1fr); }
+      .rail { display: none; }
+    }
+    @media (max-width: 760px) {
+      .topbar { height: auto; min-height: 68px; padding: 13px 16px; align-items: flex-start; }
+      .top-actions { flex-wrap: wrap; justify-content: flex-end; }
+      .status-pill { width: 100%; justify-content: flex-end; }
+      .layout { display: block; }
+      .sidebar { position: static; height: auto; padding: 15px 16px; border-right: 0; border-bottom: 1px solid var(--border); }
+      nav { display: flex; overflow-x: auto; }
+      nav a { white-space: nowrap; }
+      .sidebar-note { display: none; }
+      .content { padding: 25px 16px 50px; }
+      .page-heading { display: block; }
+      .endpoint { min-width: 0; margin-top: 18px; }
+      .overview-grid, .form-grid { grid-template-columns: 1fr; }
+      .route-table { min-width: 650px; }
+      .panel-body:has(.route-table) { overflow-x: auto; }
+      .model-item { grid-template-columns: minmax(0, 1fr) auto; }
+      .model-item .protocol-tags { grid-column: 1 / -1; grid-row: 2; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">QG</div>
+      <div><strong>QODER GATEWAY</strong><span>local control plane</span></div>
+    </div>
+    <div class="top-actions">
+      <div class="status-pill"><span id="statusDot" class="status-dot"></span><span id="statusText">正在连接</span></div>
+      <button id="refreshButton" class="ghost" type="button">刷新</button>
+      <button id="saveButton" class="primary" type="button">保存配置</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <p class="nav-label">控制台</p>
+      <nav>
+        <a class="active" href="#overview">概览</a>
+        <a href="#access">访问设置</a>
+        <a href="#providers">上游 Provider</a>
+        <a href="#routes">模型路由</a>
+        <a href="#diagnostics">连通性</a>
+      </nav>
+      <div class="sidebar-note">仅建议在本机使用。API Key 通过环境变量注入。</div>
+    </aside>
+
+    <section class="content">
+      <div class="page-heading" id="overview">
+        <div>
+          <p class="eyebrow">LOCAL CONTROL PLANE / 01</p>
+          <h1>网关控制台</h1>
+          <p class="lede">把 Qoder 的模型请求映射到 ymeng.cc 或其他 OpenAI / Anthropic 兼容上游。</p>
+        </div>
+        <div class="endpoint"><small>本地 API Endpoint</small><code>http://127.0.0.1:8787</code></div>
+      </div>
+
+      <div id="notice" class="notice"></div>
+
+      <div class="overview-grid">
+        <div class="metric"><div class="metric-label">网关状态</div><div id="metricStatus" class="metric-value green">连接中</div></div>
+        <div class="metric"><div class="metric-label">已配置 Provider</div><div id="metricProviders" class="metric-value">-</div></div>
+        <div class="metric"><div class="metric-label">可用模型别名</div><div id="metricRoutes" class="metric-value">-</div></div>
+      </div>
+
+      <section class="panel" id="access">
+        <div class="panel-head"><div><h2>访问设置</h2><p>浏览器管理接口和 Qoder 转发接口共用本地鉴权。</p></div></div>
+        <div class="panel-body">
+          <div class="form-grid">
+            <div class="field"><label for="gatewayKey">当前网关 Key</label><input id="gatewayKey" type="password" placeholder="如果启动时设置了 QODER_GATEWAY_API_KEY，请在此输入"></div>
+            <div class="field"><label for="gatewayKeyEnv">网关 Key 环境变量名</label><input id="gatewayKeyEnv" data-config="gateway_api_key_env" placeholder="QODER_GATEWAY_API_KEY"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="providers">
+        <div class="panel-head">
+          <div><h2>中转站 Provider</h2><p>模型 ID 和支持协议以同步到的上游目录为准；同一 Provider 可承载多条路由。</p></div>
+          <button id="addProviderButton" type="button">添加自定义 Provider</button>
+        </div>
+        <div id="providerList" class="panel-body"></div>
+      </section>
+
+      <section class="panel" id="routes">
+        <div class="panel-head">
+          <div><h2>模型路由</h2><p>Qoder 发送左侧别名，网关将右侧模型名和该路由协议发给同一个中转站。</p></div>
+          <button id="addRouteButton" type="button">添加路由</button>
+        </div>
+        <div class="panel-body">
+          <table class="route-table">
+            <thead><tr><th>Qoder 模型别名</th><th>Provider</th><th>上游模型 ID</th><th>入口协议</th><th>顺序</th><th></th></tr></thead>
+            <tbody id="routeList"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" id="diagnostics">
+        <div class="panel-head">
+          <div><h2>连通性与模型目录</h2><p>从 ymeng 的 <code>/v1/models</code> 同步真实模型 ID 和支持的入口协议，不再猜模型名。</p></div>
+          <button id="syncModelsButton" type="button">同步中转站模型</button>
+        </div>
+        <div class="panel-body">
+          <div class="form-grid">
+            <div class="field"><label for="testProvider">选择 Provider</label><select id="testProvider"></select></div>
+            <div class="field"><label>&nbsp;</label><button id="testButton" class="primary" type="button">测试上游</button></div>
+          </div>
+          <pre id="testOutput">尚未测试。</pre>
+          <div id="modelCatalog" class="model-catalog"><div class="empty">点击“同步中转站模型”加载真实模型目录。</div></div>
+        </div>
+      </section>
+    </section>
+
+    <aside class="rail">
+      <div class="rail-section">
+        <div class="rail-title">运行摘要</div>
+        <div class="rail-box">
+          <div class="rail-stat"><span>监听地址</span><span id="listenSummary" class="mono">-</span></div>
+          <div class="rail-stat"><span>鉴权变量</span><span id="authSummary" class="mono">-</span></div>
+          <div class="rail-stat"><span>配置文件</span><span class="mono">config.json</span></div>
+        </div>
+      </div>
+      <div class="rail-section">
+        <div class="rail-title">安全边界</div>
+        <div class="rail-box muted">
+          页面不读取上游 Token。不要把监听地址改成公网网卡，也不要把 API Key 写进 JSON。
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const state = { config: null, gatewayKey: sessionStorage.getItem("qoder-gateway-key") || "", modelCatalog: [] };
+    const $ = (selector) => document.querySelector(selector);
+
+    function showNotice(message, error = false) {
+      const notice = $("#notice");
+      notice.textContent = message;
+      notice.className = `notice show${error ? " error" : ""}`;
+    }
+
+    function clearNotice() {
+      $("#notice").className = "notice";
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[char]));
+    }
+
+    async function api(path, options = {}) {
+      const headers = { ...(options.headers || {}) };
+      if (options.body) headers["content-type"] = "application/json";
+      if (state.gatewayKey) headers.authorization = `Bearer ${state.gatewayKey}`;
+      const response = await fetch(path, { ...options, headers });
+      const text = await response.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = { raw: text }; }
+      if (!response.ok) throw new Error(data?.error?.message || `请求失败 (${response.status})`);
+      return data;
+    }
+
+    async function loadConfig() {
+      try {
+        const data = await api("/admin/config");
+        state.config = data;
+        render();
+        setStatus(true, "运行中");
+        clearNotice();
+      } catch (error) {
+        setStatus(false, "需要鉴权");
+        showNotice(`${error.message}。请在“访问设置”填写网关 Key 后点击刷新。`, true);
+      }
+    }
+
+    function setStatus(ok, text) {
+      $("#statusDot").className = `status-dot ${ok ? "ok" : "bad"}`;
+      $("#statusText").textContent = text;
+      $("#metricStatus").textContent = ok ? "运行中" : "未连接";
+      $("#metricStatus").className = `metric-value ${ok ? "green" : ""}`;
+    }
+
+    function normalizeEntries(route) {
+      const entries = Array.isArray(route) ? route : [route];
+      return entries.map((entry) => typeof entry === "string" ? { provider: entry, model: "" } : { ...entry });
+    }
+
+    function routeRows() {
+      return Object.entries(state.config.routes || {}).flatMap(([alias, route]) =>
+        normalizeEntries(route).map((entry, order) => ({ alias, order, ...entry }))
+      );
+    }
+
+    function render() {
+      const config = state.config;
+      $("#gatewayKey").value = state.gatewayKey;
+      $("#gatewayKeyEnv").value = config.gateway_api_key_env || "";
+      $("#metricProviders").textContent = Object.keys(config.providers || {}).length;
+      $("#metricRoutes").textContent = Object.keys(config.routes || {}).length;
+      $("#listenSummary").textContent = config.listen || "-";
+      $("#authSummary").textContent = config.gateway_api_key_env || "未启用";
+
+      const providerNames = Object.keys(config.providers || {});
+      $("#providerList").innerHTML = providerNames.length
+        ? providerNames.map((name) => providerTemplate(name, config.providers[name])).join("")
+        : '<div class="empty">还没有 Provider，先添加一个上游。</div>';
+      $("#testProvider").innerHTML = providerNames.map((name) =>
+        `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join("");
+
+      const rows = routeRows();
+      $("#routeList").innerHTML = rows.length
+        ? rows.map((row, index) => routeTemplate(row, index, providerNames)).join("")
+        : '<tr><td colspan="6" class="empty">还没有路由。</td></tr>';
+      renderModelCatalog();
+    }
+
+    function providerTemplate(name, provider) {
+      const configured = provider.api_key_configured ? "Token 已注入" : "等待环境变量";
+      return `
+        <div class="provider" data-provider="${escapeHtml(name)}">
+          <div class="provider-head">
+            <span class="provider-name mono">${escapeHtml(name)}</span>
+            <span class="provider-badge">${configured}</span>
+          </div>
+          <div class="form-grid">
+            <div class="field"><label>Provider 名称</label><input data-provider-field="name" value="${escapeHtml(name)}"></div>
+            <div class="field"><label>协议</label><select data-provider-field="protocol">
+              <option value="openai" ${provider.protocol === "openai" ? "selected" : ""}>OpenAI Chat</option>
+              <option value="openai-response" ${provider.protocol === "openai-response" ? "selected" : ""}>OpenAI Responses</option>
+              <option value="anthropic" ${provider.protocol === "anthropic" ? "selected" : ""}>Anthropic Messages</option>
+              <option value="gemini" ${provider.protocol === "gemini" ? "selected" : ""}>Gemini</option>
+            </select></div>
+            <div class="field full"><label>API Base URL</label><input data-provider-field="base_url" value="${escapeHtml(provider.base_url)}"></div>
+            <div class="field"><label>API Key 环境变量名</label><input data-provider-field="api_key_env" value="${escapeHtml(provider.api_key_env)}" placeholder="YMENG_API_KEY"><span class="muted">可填 YMENG_API_KEY；这是变量名，不是密钥。</span></div>
+            <div class="field"><label>第三方 API Key（本次运行）</label><input data-provider-secret type="password" placeholder="${provider.api_key_configured ? "已配置，留空保持不变" : "粘贴 api.ymeng.cc 的新 API Key"}"><span class="muted">只保存在网关内存中，不写入 config.json；重启后需重新输入。</span></div>
+            <div class="field"><label>超时（毫秒）</label><input data-provider-field="timeout_ms" type="number" min="1000" value="${escapeHtml(provider.timeout_ms || 120000)}"></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;margin-top:13px"><button class="danger" type="button" data-remove-provider="${escapeHtml(name)}">删除 Provider</button></div>
+        </div>`;
+    }
+
+    function routeTemplate(row, index, providerNames) {
+      return `<tr data-route-index="${index}">
+        <td><input data-route-field="alias" value="${escapeHtml(row.alias)}"></td>
+        <td><select data-route-field="provider">${providerNames.map((name) =>
+          `<option value="${escapeHtml(name)}" ${name === row.provider ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}</select></td>
+        <td><input data-route-field="model" value="${escapeHtml(row.model)}" placeholder="例如 qwen3-coder"></td>
+        <td><select data-route-field="protocol">
+          <option value="openai" ${row.protocol === "openai" || !row.protocol ? "selected" : ""}>OpenAI Chat</option>
+          <option value="openai-response" ${row.protocol === "openai-response" ? "selected" : ""}>OpenAI Responses</option>
+          <option value="anthropic" ${row.protocol === "anthropic" ? "selected" : ""}>Anthropic</option>
+          <option value="gemini" ${row.protocol === "gemini" ? "selected" : ""}>Gemini</option>
+        </select></td>
+        <td><span class="muted">${row.order + 1}</span></td>
+        <td><button class="danger" type="button" data-remove-route="${index}">删除</button></td>
+      </tr>`;
+    }
+
+    function collectConfig() {
+      const providers = {};
+      document.querySelectorAll("[data-provider]").forEach((element) => {
+        const originalName = element.dataset.provider;
+        const get = (field) => element.querySelector(`[data-provider-field="${field}"]`).value.trim();
+        const name = get("name") || originalName;
+        providers[name] = {
+          protocol: get("protocol"),
+          base_url: get("base_url"),
+          api_key_env: get("api_key_env"),
+          timeout_ms: Number(get("timeout_ms")) || 120000
+        };
+      });
+
+      const grouped = {};
+      document.querySelectorAll("#routeList tr[data-route-index]").forEach((row) => {
+        const get = (field) => row.querySelector(`[data-route-field="${field}"]`).value.trim();
+        const alias = get("alias");
+        if (!alias) return;
+        const entry = { provider: get("provider"), model: get("model"), protocol: get("protocol") };
+        grouped[alias] ||= [];
+        grouped[alias].push(entry);
+      });
+      const routes = Object.fromEntries(Object.entries(grouped).map(([alias, entries]) =>
+        [alias, entries.length === 1 ? entries[0] : entries]));
+      return {
+        listen: state.config.listen,
+        gateway_api_key_env: $("#gatewayKeyEnv").value.trim(),
+        max_body_bytes: state.config.max_body_bytes,
+        qoder_patch: state.config.qoder_patch
+          ? {
+            enabled: state.config.qoder_patch.enabled === true,
+            gateway_url: state.config.qoder_patch.gateway_url
+          }
+          : undefined,
+        providers,
+        routes
+      };
+    }
+
+    async function saveConfig() {
+      try {
+        const secrets = collectSecrets();
+        const next = collectConfig();
+        const data = await api("/admin/config", { method: "PUT", body: JSON.stringify(next) });
+        for (const secret of secrets) {
+          if (secret.apiKey) {
+            await api("/admin/provider-secret", {
+              method: "PUT",
+              body: JSON.stringify({ provider: secret.provider, api_key: secret.apiKey })
+            });
+          }
+        }
+        const refreshed = await api("/admin/config");
+        state.config = refreshed || data;
+        render();
+        const sync = data.qoder_patch_sync;
+        if (sync?.status === "applied") {
+          showNotice(`配置已保存，已自动注入 ${sync.models?.length || 0} 个模型；重启 Qoder 后生效。`);
+        } else if (sync?.status === "disabled") {
+          showNotice("配置已保存，但 Qoder 自动注入已关闭。");
+        } else if (sync?.status === "unavailable") {
+          showNotice("配置已保存，但当前网关没有可用的 Qoder 注入器。", true);
+        } else if (sync?.status === "skipped") {
+          showNotice(`配置已保存，但模型自动注入失败：${sync.error || "请检查 Qoder 安装和网关日志。"}`, true);
+        } else {
+          showNotice("配置已保存，API Key 已临时注入当前网关进程。");
+        }
+      } catch (error) {
+        showNotice(error.message, true);
+      }
+    }
+
+    function collectSecrets() {
+      return Array.from(document.querySelectorAll("[data-provider]")).map((element) => ({
+        provider: element.querySelector('[data-provider-field="name"]').value.trim() || element.dataset.provider,
+        apiKey: element.querySelector("[data-provider-secret]").value.trim()
+      }));
+    }
+
+    $("#gatewayKey").addEventListener("change", (event) => {
+      state.gatewayKey = event.target.value;
+      sessionStorage.setItem("qoder-gateway-key", state.gatewayKey);
+    });
+    $("#refreshButton").addEventListener("click", loadConfig);
+    $("#saveButton").addEventListener("click", saveConfig);
+    $("#syncModelsButton").addEventListener("click", syncModels);
+    $("#addProviderButton").addEventListener("click", () => {
+      const name = `provider-${Date.now().toString().slice(-5)}`;
+      state.config.providers[name] = {
+        protocol: "openai", base_url: "https://api.ymeng.cc/v1",
+        api_key_env: "YMENG_API_KEY", api_key_configured: false, timeout_ms: 120000
+      };
+      render();
+    });
+    $("#addRouteButton").addEventListener("click", () => {
+      const firstProvider = Object.keys(state.config.providers || {})[0] || "ymeng-openai";
+      const alias = `qoder-model-${Object.keys(state.config.routes || {}).length + 1}`;
+      state.config.routes[alias] = { provider: firstProvider, model: "" };
+      render();
+    });
+    $("#providerList").addEventListener("click", (event) => {
+      const name = event.target.dataset.removeProvider;
+      if (!name) return;
+      delete state.config.providers[name];
+      for (const [alias, route] of Object.entries(state.config.routes)) {
+        const entries = normalizeEntries(route).filter((entry) => entry.provider !== name);
+        if (!entries.length) delete state.config.routes[alias];
+        else state.config.routes[alias] = entries.length === 1 ? entries[0] : entries;
+      }
+      render();
+    });
+    $("#routeList").addEventListener("click", (event) => {
+      const index = Number(event.target.dataset.removeRoute);
+      if (!Number.isInteger(index)) return;
+      const rows = routeRows();
+      rows.splice(index, 1);
+      state.config.routes = {};
+      for (const row of rows) {
+        const entry = { provider: row.provider, model: row.model, protocol: row.protocol };
+        if (!state.config.routes[row.alias]) state.config.routes[row.alias] = entry;
+        else state.config.routes[row.alias] = [...normalizeEntries(state.config.routes[row.alias]), entry];
+      }
+      render();
+    });
+    $("#testButton").addEventListener("click", async () => {
+      const provider = $("#testProvider").value;
+      $("#testOutput").textContent = "正在请求上游...";
+      try {
+        const result = await api("/admin/test-upstream", { method: "POST", body: JSON.stringify({ provider }) });
+        $("#testOutput").textContent = JSON.stringify(result, null, 2);
+      } catch (error) {
+        $("#testOutput").textContent = error.message;
+      }
+    });
+
+    async function syncModels() {
+      const provider = $("#testProvider").value;
+      if (!provider) {
+        showNotice("请先配置一个 Provider。", true);
+        return;
+      }
+      $("#modelCatalog").innerHTML = '<div class="empty">正在同步模型目录...</div>';
+      try {
+        const result = await api(`/admin/upstream-models?provider=${encodeURIComponent(provider)}`);
+        state.modelCatalog = result.data || [];
+        renderModelCatalog();
+        showNotice(`已同步 ${state.modelCatalog.length} 个模型。`);
+      } catch (error) {
+        $("#modelCatalog").innerHTML = `<div class="empty">${escapeHtml(error.message)}</div>`;
+        showNotice(error.message, true);
+      }
+    }
+
+    function chooseProtocol(model) {
+      const supported = model.supported_endpoint_types || [];
+      if (supported.includes("openai-response")) return "openai-response";
+      if (supported.includes("openai")) return "openai";
+      if (supported.includes("anthropic")) return "anthropic";
+      return "openai";
+    }
+
+    function renderModelCatalog() {
+      const catalog = $("#modelCatalog");
+      if (!state.modelCatalog.length) {
+        catalog.innerHTML = '<div class="empty">还没有已同步的模型目录。</div>';
+        return;
+      }
+      catalog.innerHTML = state.modelCatalog.map((model) => {
+        const id = model.id || "";
+        const supported = model.supported_endpoint_types || [];
+        return `<div class="model-item">
+          <span class="model-id mono" title="${escapeHtml(id)}">${escapeHtml(id)}</span>
+          <span class="model-family">上游目录</span>
+          <span class="protocol-tags">${supported.map((protocol) => `<span class="protocol-tag">${escapeHtml(protocol)}</span>`).join("")}</span>
+          <button type="button" data-add-model="${escapeHtml(id)}">添加路由</button>
+        </div>`;
+      }).join("");
+    }
+
+    $("#modelCatalog").addEventListener("click", (event) => {
+      const modelId = event.target.dataset.addModel;
+      if (!modelId) return;
+      const model = state.modelCatalog.find((item) => item.id === modelId) || { id: modelId };
+      const provider = $("#testProvider").value;
+      const alias = modelId;
+      state.config.routes[alias] = {
+        provider,
+        model: modelId,
+        protocol: chooseProtocol(model)
+      };
+      render();
+      showNotice(`已添加路由 ${alias}，点击“保存配置”后会自动注入 Qoder。`);
+    });
+
+    loadConfig();
+  </script>
+</body>
+</html>
