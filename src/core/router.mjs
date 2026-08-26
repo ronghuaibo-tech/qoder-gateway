@@ -44,6 +44,19 @@ export function validateConfig(config) {
       }
     }
   }
+  if (config.workspace_roots !== undefined) {
+    if (!Array.isArray(config.workspace_roots)) {
+      throw new Error("workspace_roots must be an array of absolute directory paths");
+    }
+    for (const root of config.workspace_roots) {
+      if (typeof root !== "string" || !root.trim()) {
+        throw new Error("workspace_roots entries must be non-empty strings");
+      }
+      if (root.includes("\0")) {
+        throw new Error("workspace_roots entries must not contain null bytes");
+      }
+    }
+  }
   for (const [alias, route] of Object.entries(config.routes)) {
     const entries = flattenRouteEntries(route);
     if (!entries.length) throw new Error(`route ${alias} must not be empty`);

@@ -84,20 +84,32 @@ npm start
 curl -X POST http://127.0.0.1:8787/admin/qoder-patch
 ```
 
-当前 Qoder 本地补丁为 V12，专门处理本地 Gateway 模型的长任务事件分流：
+当前 Qoder 本地补丁为 V27。V16 到 V26 主要补齐了 Quest 终态收口、
+工作区 URI 回退、initialize `rootUri` 可枚举，以及只读插件缓存工具。
+V27 修复第三方模型在 Quest 里被工具回路掐死的问题：
 
 - Responses `response.reasoning_*` 事件只发送为 ACP `agent_thought_chunk`
   思考事件，不混入正文。
 - Responses `response.output_text.*` 事件只发送为 ACP
   `agent_message_chunk` 正文事件，并防止 delta 与 done 重复显示。
 - 原生 `function_call` 会转换为 ACP `tool_call`，工具完成后发送
-  `tool_call_update`，再用 `function_call_output` 继续请求，单次请求最多处理
-  20 轮，避免短任务在第 3 次工具调用后被误判为异常。
-- Qoder 只会收到 `read_file`、`list_files`、`search_text` 三个只读工具；
-  工具执行通过本机 `POST /admin/local-tool`，只接受 localhost 请求，并且
-  受工作区根目录、路径穿越和符号链接逃逸检查保护。
+  `tool_call_update`，再用 `function_call_output` 继续请求。单次请求最多
+  8 轮、24 次工具调用；同一签名重复超过 2 次会停止，避免短任务被误判或空转。
+- Qoder 会收到工作区只读工具 `read_file`、`list_files`、`search_text`，
+  以及插件缓存只读工具 `list_qoder_plugins`、`list_qoder_plugin_files`、
+  `read_qoder_plugin_file`、`search_qoder_plugins`。工具执行通过本机
+  `POST /admin/local-tool`，只接受 localhost 请求。工作区文件工具必须落在
+  配置的 `workspace_roots` 内；未打开文件夹或未配置根目录时会拒绝
+  `read_file` / `list_files` / `search_text`，但插件缓存工具仍可使用。
+- 同一组参数的重复工具调用会复用上次结果并继续对话，不再把整场任务掐死。
+  上游失败会作为一段说明文字结束，而不是 Qoder「系统发生异常」。
 - 不支持终端、Shell、写文件、补丁或任意命令执行。工具解析失败或工具不在
   allowlist 时不会执行任何命令，而是把失败结果返回给模型继续处理。
+- 补丁会先发送 `session/prompt` 和 `chat_finish` 终态，再异步追加历史记录；
+  历史写入变慢或失败不会让 Quest 侧栏一直保持运行中。成功、失败和取消
+  都有一次性终态保护。
+- V21 起跳过空工作区的 builtin command 刷新；V22-V26 为 Quest 空工作区
+  和 initialize `rootUri` 提供本机回退，避免语言服务器初始化失败。
 
 因此，长工作中看到思考、正文和工具卡片同时出现并不代表网关把内容混成一段：
 它们分别对应 Qoder 的思考事件、消息事件和工具生命周期事件。若 Qoder
@@ -124,7 +136,17 @@ curl -sS -X POST http://127.0.0.1:8787/admin/local-tool \
 ```
 
 该接口仅用于 Qoder 本地补丁的受控工具回路，不是通用命令执行 API，也不应
-暴露到公网。
+暴露到公网。调用前必须在 `config.json` 或控制台填写 `workspace_roots`，
+例如：
+
+```json
+"workspace_roots": [
+  "/Users/a0000/Documents/gpt-codex/qoder-gateway"
+]
+```
+
+`workspace_path` 必须等于其中一个根目录，或落在其内部。未配置根目录时，
+接口会返回 `workspace_roots_unconfigured`，而不是读取任意本机路径。
 
 在本地控制台添加路由并点击“保存配置”后，网关会自动重新读取当前
 `/v1/models` 并注入 Qoder Provider，不需要再手动调用上面的接口。保存响应中的
@@ -253,10 +275,10 @@ POST /bridge/qoder/session/:session_id/close
 不是同一套命名；当前只使用从本机日志观察到的值，不在 Gateway 中硬编码
 新的上游模型名。
 
-API Key 只能通过环境变量或运行时内存输入：
+API Key 只能通过环境变量、运行时内存或 macOS 钥匙串输入：
 
 - `api_key_env` 只填写变量名，例如 `YMENG_API_KEY`
-- 控制台的“第三方 API Key（本次运行）”只保存在当前进程内存
+- 控制台的“第三方 API Key”默认只保存在当前进程内存；勾选后写入钥匙串
 - 不要把真实密钥写入 `config.json`、README、Qoder 补丁或提交记录
 - 配置返回值、诊断响应和网关错误会过滤鉴权信息
 
@@ -266,6 +288,11 @@ Provider 的 `base_url` 应使用 API 根路径，例如：
 
 ```json
 {
+  "listen": "127.0.0.1:8787",
+  "gateway_api_key_env": "",
+  "workspace_roots": [
+    "/Users/a0000/Documents/gpt-codex/qoder-gateway"
+  ],
   "providers": {
     "ymeng-openai": {
       "protocol": "openai",
@@ -424,10 +451,16 @@ handoff、工具确认和文件上下文，不需要再修改 Gateway Base URL�
 ## 安全边界
 
 - 默认只监听 `127.0.0.1`。
-- API Key 只能来自环境变量或运行时内存。
+- API Key 只能来自环境变量、运行时内存或 macOS 钥匙串。
 - `api_key_env` 必须是类似 `YMENG_API_KEY` 的变量名。
 - 配置禁止保存 API Key、嵌入式 URL 凭据和敏感自定义 Header。
-- 工具默认 dry-run，只允许受控文件工具；不开放任意终端命令。
+- `GET /health` 公开。`/admin/recent-requests` 和其他管理接口走
+  `authorize()`；未配置 `gateway_api_key_env` 时，本机控制台仍可访问，
+  但不要把监听地址改成公网网卡。
+- `POST /admin/local-tool` 只接受 localhost，且工作区必须在
+  `workspace_roots` 内；未配置根目录时 fail closed。
+- 工具默认 dry-run，只允许受控文件工具和只读插件缓存工具；不开放任意
+  终端命令。
 - Qoder Desktop 的 app bundle 修改由网关启动时的
   `src/core/qoder-patch.mjs` 执行；`tools/patch-qoder.mjs` 只是兼容入口。
   没有修改 custom pool 云端逻辑，也没有新增公网服务。
@@ -438,10 +471,10 @@ handoff、工具确认和文件上下文，不需要再修改 Gateway Base URL�
 npm test
 ```
 
-当前验证结果：56 个测试全部通过，覆盖 Chat、Responses、Anthropic、
-SSE、tool_calls、tool result、fallback、能力发现、脱敏、鉴权
-fail-closed、工具路径安全、JSON-RPC framing、mock IPC 请求/响应/
-通知和 Bridge 本地自测。另行完成了真实 Qoder CN socket
+当前验证结果：覆盖 Chat、Responses、Anthropic、SSE、tool_calls、
+tool result、fallback、能力发现、脱敏、鉴权 fail-closed、管理接口鉴权、
+`workspace_roots` 约束、空工作区插件工具、重复工具复用、工具路径安全、
+JSON-RPC framing、mock IPC 请求/响应/通知和 Bridge 本地自测。另行完成了真实 Qoder CN socket
 的非流式 prompt、流式 prompt、controlled `read_file`、cancel，以及
 持久化 session 的两次复用 prompt 和 close 运行态验证；同时完成了
 Qoder Desktop 选择 `qwen3.8-max`、本地 `/v1/responses` 返回 200 以及

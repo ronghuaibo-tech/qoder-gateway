@@ -58,7 +58,7 @@
     button.primary:hover { background: #2c9c54; }
     button.ghost { background: transparent; }
     button.danger { color: #ff9bad; }
-    input, select {
+    input, select, textarea {
       width: 100%;
       min-height: 40px;
       border: 1px solid var(--border);
@@ -67,7 +67,24 @@
       color: var(--text);
       padding: 0 11px;
     }
-    input::placeholder { color: #5f6b7b; }
+    textarea {
+      min-height: 84px;
+      padding: 10px 11px;
+      resize: vertical;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+    input::placeholder, textarea::placeholder { color: #5f6b7b; }
+    .checkline {
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--text);
+    }
+    .checkline input {
+      width: auto;
+      min-height: 0;
+    }
     code, .mono {
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
     }
@@ -411,6 +428,7 @@
           <div class="form-grid">
             <div class="field"><label for="gatewayKey">当前网关 Key</label><input id="gatewayKey" type="password" placeholder="如果启动时设置了 QODER_GATEWAY_API_KEY，请在此输入"></div>
             <div class="field"><label for="gatewayKeyEnv">网关 Key 环境变量名</label><input id="gatewayKeyEnv" data-config="gateway_api_key_env" placeholder="QODER_GATEWAY_API_KEY"></div>
+            <div class="field full"><label for="workspaceRoots">受控工具工作区根目录</label><textarea id="workspaceRoots" rows="3" placeholder="/Users/you/project"></textarea><span class="muted">每行一个绝对路径。未配置时，本机 <code>/admin/local-tool</code> 会拒绝所有工作区文件工具。</span></div>
           </div>
         </div>
       </section>
@@ -464,7 +482,8 @@
       <div class="rail-section">
         <div class="rail-title">安全边界</div>
         <div class="rail-box muted">
-          页面不读取上游 Token。不要把监听地址改成公网网卡，也不要把 API Key 写进 JSON。
+          页面不读取上游 Token。不要把监听地址改成公网网卡，也不要把 API Key 写进 JSON。<br><br>
+          <code>/health</code> 公开；<code>/admin/recent-requests</code> 和其他管理接口走网关 Key。<code>/admin/local-tool</code> 仅本机可调用，且必须落在上面的工作区根目录内。
         </div>
       </div>
     </aside>
@@ -537,6 +556,9 @@
       const config = state.config;
       $("#gatewayKey").value = state.gatewayKey;
       $("#gatewayKeyEnv").value = config.gateway_api_key_env || "";
+      $("#workspaceRoots").value = Array.isArray(config.workspace_roots)
+        ? config.workspace_roots.join("\n")
+        : "";
       $("#metricProviders").textContent = Object.keys(config.providers || {}).length;
       $("#metricRoutes").textContent = Object.keys(config.routes || {}).length;
       $("#listenSummary").textContent = config.listen || "-";
@@ -574,7 +596,8 @@
             </select></div>
             <div class="field full"><label>API Base URL</label><input data-provider-field="base_url" value="${escapeHtml(provider.base_url)}"></div>
             <div class="field"><label>API Key 环境变量名</label><input data-provider-field="api_key_env" value="${escapeHtml(provider.api_key_env)}" placeholder="YMENG_API_KEY"><span class="muted">可填 YMENG_API_KEY；这是变量名，不是密钥。</span></div>
-            <div class="field"><label>第三方 API Key（本次运行）</label><input data-provider-secret type="password" placeholder="${provider.api_key_configured ? "已配置，留空保持不变" : "粘贴 api.ymeng.cc 的新 API Key"}"><span class="muted">只保存在网关内存中，不写入 config.json；重启后需重新输入。</span></div>
+            <div class="field"><label>第三方 API Key</label><input data-provider-secret type="password" placeholder="${provider.api_key_configured ? "已配置，留空保持不变" : "粘贴 api.ymeng.cc 的新 API Key"}"><span class="muted">默认只注入当前网关进程；勾选下方选项后保存到 macOS 钥匙串，不写入 config.json。</span></div>
+            <div class="field"><label>凭据持久化</label><label class="checkline"><input data-provider-secret-persist type="checkbox"> 存入 macOS 钥匙串</label><span class="muted">用于网关重启后自动恢复第三方 API Key。</span></div>
             <div class="field"><label>超时（毫秒）</label><input data-provider-field="timeout_ms" type="number" min="1000" value="${escapeHtml(provider.timeout_ms || 120000)}"></div>
           </div>
           <div style="display:flex;justify-content:flex-end;margin-top:13px"><button class="danger" type="button" data-remove-provider="${escapeHtml(name)}">删除 Provider</button></div>
@@ -627,6 +650,7 @@
         listen: state.config.listen,
         gateway_api_key_env: $("#gatewayKeyEnv").value.trim(),
         max_body_bytes: state.config.max_body_bytes,
+        workspace_roots: $("#workspaceRoots").value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean),
         qoder_patch: state.config.qoder_patch
           ? {
             enabled: state.config.qoder_patch.enabled === true,
@@ -647,7 +671,11 @@
           if (secret.apiKey) {
             await api("/admin/provider-secret", {
               method: "PUT",
-              body: JSON.stringify({ provider: secret.provider, api_key: secret.apiKey })
+              body: JSON.stringify({
+                provider: secret.provider,
+                api_key: secret.apiKey,
+                persist_keychain: secret.persistKeychain === true
+              })
             });
           }
         }
@@ -674,7 +702,8 @@
     function collectSecrets() {
       return Array.from(document.querySelectorAll("[data-provider]")).map((element) => ({
         provider: element.querySelector('[data-provider-field="name"]').value.trim() || element.dataset.provider,
-        apiKey: element.querySelector("[data-provider-secret]").value.trim()
+        apiKey: element.querySelector("[data-provider-secret]").value.trim(),
+        persistKeychain: element.querySelector("[data-provider-secret-persist]")?.checked === true
       }));
     }
 

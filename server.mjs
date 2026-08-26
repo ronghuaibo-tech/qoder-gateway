@@ -1,8 +1,11 @@
 import crypto from "node:crypto";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { fromAnthropic, anthropicToOpenAI, anthropicToResponses, toAnthropic } from "./src/adapters/anthropic.mjs";
@@ -25,6 +28,8 @@ import { verifiedUpstreamMetadata } from "./src/core/upstream-capabilities.mjs";
 
 const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "public");
+const KEYCHAIN_SERVICE = "com.qoder.gateway";
+const execFileAsync = promisify(execFile);
 
 export async function loadConfig(filePath) {
   const raw = await fs.readFile(filePath, "utf8");
@@ -33,15 +38,44 @@ export async function loadConfig(filePath) {
   return config;
 }
 
+export async function loadPersistentSecrets(config, keychain = defaultKeychainStore()) {
+  const runtimeSecrets = new Map();
+  for (const [providerName, provider] of Object.entries(config.providers ?? {})) {
+    const envSecret = resolveProviderApiKey(provider);
+    if (envSecret) {
+      runtimeSecrets.set(providerName, envSecret);
+      continue;
+    }
+    if (!keychain) continue;
+    const keychainSecret = await keychain.read(providerName).catch(() => undefined);
+    if (keychainSecret) runtimeSecrets.set(providerName, keychainSecret);
+  }
+  return runtimeSecrets;
+}
+
 export function createGateway(config, options = {}) {
   validateConfig(config);
   const fetchImpl = options.fetchImpl ?? globalThis.fetch;
   const maxBodyBytes = config.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES;
   const configPath = options.configPath;
   const qoderPatchRunner = options.qoderPatchRunner;
-  const runtimeSecrets = new Map();
+  const runtimeSecrets = options.runtimeSecrets instanceof Map
+    ? new Map(options.runtimeSecrets)
+    : new Map();
+  const keychain = options.keychain === undefined ? null : options.keychain;
+  let keychainHydrated = false;
   const capabilities = options.capabilities ?? new ModelCapabilityRegistry();
   const recentRequests = [];
+
+  async function ensureKeychainSecrets() {
+    if (keychainHydrated || !keychain) return;
+    keychainHydrated = true;
+    for (const providerName of Object.keys(config.providers ?? {})) {
+      if (runtimeSecrets.has(providerName)) continue;
+      const secret = await keychain.read(providerName).catch(() => undefined);
+      if (secret) runtimeSecrets.set(providerName, secret);
+    }
+  }
 
   return async function gatewayHandler(req, res) {
     const requestId = crypto.randomUUID();
@@ -56,6 +90,7 @@ export function createGateway(config, options = {}) {
     res.setHeader("X-Qoder-Gateway-Request-Id", requestId);
 
     try {
+      await ensureKeychainSecrets();
       const url = new URL(req.url, "http://localhost");
       if (req.method === "OPTIONS") {
         res.writeHead(204);
@@ -70,10 +105,6 @@ export function createGateway(config, options = {}) {
         json(res, 200, { ok: true, service: "qoder-bridge-gateway", request_id: requestId });
         return;
       }
-      if (url.pathname === "/admin/recent-requests" && req.method === "GET") {
-        json(res, 200, { data: recentRequests });
-        return;
-      }
       if (url.pathname === "/admin/local-tool" && req.method === "POST") {
         if (!isLoopbackRequest(req)) {
           json(res, 403, {
@@ -85,7 +116,7 @@ export function createGateway(config, options = {}) {
           return;
         }
         const body = await readJson(req, maxBodyBytes);
-        const result = await executeLocalTool(body);
+        const result = await executeLocalTool(body, config);
         json(res, 200, {
           request_id: requestId,
           ...result
@@ -94,6 +125,10 @@ export function createGateway(config, options = {}) {
       }
       if (!authorize(req, config)) {
         json(res, 401, { error: { message: "invalid gateway API key", type: "authentication_error" } });
+        return;
+      }
+      if (url.pathname === "/admin/recent-requests" && req.method === "GET") {
+        json(res, 200, { data: recentRequests });
         return;
       }
       if (url.pathname === "/admin/qoder-patch" && req.method === "POST") {
@@ -145,8 +180,14 @@ export function createGateway(config, options = {}) {
           error.statusCode = 400;
           throw error;
         }
-        if (body.api_key.trim()) runtimeSecrets.set(providerName, body.api_key.trim());
-        else runtimeSecrets.delete(providerName);
+        const apiKey = body.api_key.trim();
+        if (apiKey) {
+          runtimeSecrets.set(providerName, apiKey);
+          if (body.persist_keychain === true && keychain) await keychain.write(providerName, apiKey);
+        } else {
+          runtimeSecrets.delete(providerName);
+          if (body.persist_keychain === true && keychain) await keychain.delete(providerName);
+        }
         const patchResult = await autoInjectQoderModels(config, qoderPatchRunner);
         json(res, 200, {
           ...redactConfig(config, runtimeSecrets),
@@ -278,15 +319,43 @@ function isLoopbackRequest(req) {
     || address === "::ffff:127.0.0.1";
 }
 
-async function executeLocalTool(body) {
-  const workspacePath = body.workspace_path ?? body.workspacePath;
-  if (typeof workspacePath !== "string" || workspacePath.length === 0) {
+function configuredWorkspaceRoots(config) {
+  return (Array.isArray(config?.workspace_roots) ? config.workspace_roots : [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .map((item) => path.resolve(item));
+}
+
+function allowlistedWorkspace(config, workspacePath) {
+  const roots = configuredWorkspaceRoots(config);
+  if (!roots.length) {
     return {
       ok: false,
-      error: "workspace_path is required",
-      code: "workspace_required"
+      code: "workspace_roots_unconfigured",
+      error: "workspace_roots is not configured"
     };
   }
+  const resolved = path.resolve(workspacePath);
+  const allowed = roots.some((root) => resolved === root || resolved.startsWith(`${root}${path.sep}`));
+  if (!allowed) {
+    return {
+      ok: false,
+      code: "workspace_not_allowed",
+      error: "workspace_path is outside the allowed workspace roots"
+    };
+  }
+  return { ok: true, path: resolved, roots };
+}
+
+const WORKSPACE_LOCAL_TOOLS = new Set(["read_file", "list_files", "search_text"]);
+const PLUGIN_LOCAL_TOOLS = new Set([
+  "list_qoder_plugins",
+  "list_qoder_plugin_files",
+  "read_qoder_plugin_file",
+  "search_qoder_plugins"
+]);
+
+async function executeLocalTool(body, config = {}) {
   const call = normalizeLocalToolCall(body.tool_call ?? body.call ?? body);
   if (!call) {
     return {
@@ -295,8 +364,40 @@ async function executeLocalTool(body) {
       code: "tool_call_invalid"
     };
   }
+  const toolName = call.function?.name;
+  const isPluginTool = PLUGIN_LOCAL_TOOLS.has(toolName);
+  const isWorkspaceTool = WORKSPACE_LOCAL_TOOLS.has(toolName);
+  const workspacePath = body.workspace_path ?? body.workspacePath;
+  let workspaceRoots = [];
+
+  if (isWorkspaceTool) {
+    if (typeof workspacePath !== "string" || workspacePath.length === 0) {
+      return {
+        ok: false,
+        error: "open a folder in Qoder before using workspace file tools",
+        code: "workspace_required"
+      };
+    }
+    const workspace = allowlistedWorkspace(config, workspacePath);
+    if (!workspace.ok) {
+      return {
+        ok: false,
+        error: workspace.error,
+        code: workspace.code
+      };
+    }
+    workspaceRoots = [workspace.path];
+  } else if (!isPluginTool) {
+    return {
+      ok: false,
+      error: "a valid allowlisted tool call is required",
+      code: "tool_call_invalid"
+    };
+  }
+
   const policy = createToolPolicy({
-    workspaceRoots: [workspacePath],
+    workspaceRoots,
+    qoderPluginRoots: await detectQoderPluginRoots(),
     // This endpoint is intentionally restricted to the existing read-only
     // allowlist. It never enables terminal, shell, or arbitrary command tools.
     executionMode: "execute"
@@ -311,6 +412,23 @@ async function executeLocalTool(body) {
     content: result.content,
     error: result.ok ? undefined : result.content
   };
+}
+
+async function detectQoderPluginRoots() {
+  const roots = [];
+  const explicitRoots = String(process.env.QODER_PLUGIN_CACHE_ROOTS ?? process.env.QODER_PLUGIN_CACHE_ROOT ?? "")
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const candidates = explicitRoots.length
+    ? explicitRoots
+    : [path.join(os.homedir(), ".qoder-cn", "plugins", "cache")];
+  for (const candidate of candidates) {
+    const resolved = path.resolve(candidate);
+    const stat = await fs.stat(resolved).catch(() => null);
+    if (stat?.isDirectory() && !roots.includes(resolved)) roots.push(resolved);
+  }
+  return roots;
 }
 
 function normalizeLocalToolCall(value) {
@@ -536,6 +654,7 @@ function redactConfig(config, runtimeSecrets = new Map()) {
     listen: config.listen ?? "127.0.0.1:8787",
     gateway_api_key_env: config.gateway_api_key_env ?? "",
     max_body_bytes: config.max_body_bytes ?? DEFAULT_MAX_BODY_BYTES,
+    workspace_roots: Array.isArray(config.workspace_roots) ? config.workspace_roots : [],
     providers: Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => [
       name,
       {
@@ -567,6 +686,9 @@ async function persistConfig(currentConfig, nextConfig, configPath) {
   const persistedConfig = { ...nextConfig };
   if (persistedConfig.qoder_patch === undefined && currentConfig.qoder_patch !== undefined) {
     persistedConfig.qoder_patch = currentConfig.qoder_patch;
+  }
+  if (persistedConfig.workspace_roots === undefined && currentConfig.workspace_roots !== undefined) {
+    persistedConfig.workspace_roots = currentConfig.workspace_roots;
   }
   for (const provider of Object.values(persistedConfig.providers ?? {})) {
     if (provider && Object.prototype.hasOwnProperty.call(provider, "api_key")) {
@@ -632,9 +754,9 @@ async function fetchUpstreamModels(fetchImpl, config, providerName, runtimeSecre
   };
 }
 
-async function refreshConfiguredCapabilities(fetchImpl, config, capabilities) {
+async function refreshConfiguredCapabilities(fetchImpl, config, capabilities, runtimeSecrets = new Map()) {
   for (const [providerName, provider] of Object.entries(config.providers ?? {})) {
-    const apiKeyConfigured = !provider.api_key_env || Boolean(process.env[provider.api_key_env]);
+    const apiKeyConfigured = Boolean(resolveProviderApiKey(provider, runtimeSecrets.get(providerName)));
     if (!apiKeyConfigured) continue;
     try {
       const result = await fetchUpstreamModels(
@@ -1172,6 +1294,65 @@ function truncate(text, max = 500) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function defaultKeychainStore() {
+  if (process.platform !== "darwin") return null;
+  return {
+    async read(providerName) {
+      return readKeychainSecret(providerName);
+    },
+    async write(providerName, secret) {
+      await writeKeychainSecret(providerName, secret);
+    },
+    async delete(providerName) {
+      await deleteKeychainSecret(providerName);
+    }
+  };
+}
+
+async function readKeychainSecret(providerName) {
+  try {
+    const { stdout } = await execFileAsync("security", [
+      "find-generic-password",
+      "-s",
+      KEYCHAIN_SERVICE,
+      "-a",
+      String(providerName),
+      "-w"
+    ], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    const value = String(stdout ?? "").trim();
+    return value || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeKeychainSecret(providerName, secret) {
+  await execFileAsync("security", [
+    "add-generic-password",
+    "-U",
+    "-s",
+    KEYCHAIN_SERVICE,
+    "-a",
+    String(providerName),
+    "-w",
+    String(secret)
+  ], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+}
+
+async function deleteKeychainSecret(providerName) {
+  try {
+    await execFileAsync("security", [
+      "delete-generic-password",
+      "-s",
+      KEYCHAIN_SERVICE,
+      "-a",
+      String(providerName)
+    ], { encoding: "utf8", maxBuffer: 1024 * 1024 });
+  } catch {
+    // Ignore absent items and Keychain deletion races.
+  }
+}
+
 async function readJson(req, maxBytes) {
   const chunks = [];
   let total = 0;
@@ -1206,11 +1387,15 @@ async function main() {
     : "./config.json";
   const config = await loadConfig(configPath);
   const capabilities = new ModelCapabilityRegistry();
+  const keychain = defaultKeychainStore();
+  const runtimeSecrets = await loadPersistentSecrets(config, keychain);
   const qoderPatchRunner = () => runQoderPatch(config);
   const server = http.createServer(createGateway(config, {
     configPath,
     capabilities,
-    qoderPatchRunner
+    qoderPatchRunner,
+    keychain,
+    runtimeSecrets
   }));
   const listen = config.listen ?? "127.0.0.1:8787";
   const separator = listen.lastIndexOf(":");
@@ -1219,7 +1404,7 @@ async function main() {
   server.listen(port, host, () => {
     console.log(`qoder-bridge-gateway listening on http://${host}:${port}`);
     void (async () => {
-      await refreshConfiguredCapabilities(globalThis.fetch, config, capabilities);
+      await refreshConfiguredCapabilities(globalThis.fetch, config, capabilities, runtimeSecrets);
       if (config.qoder_patch?.enabled === true) await qoderPatchRunner();
     })();
   });

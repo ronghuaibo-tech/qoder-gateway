@@ -273,6 +273,7 @@ test("serves the control page and persists a redacted configuration", async () =
   const saved = await request(gateway.baseUrl, "/admin/config", {
     listen: "127.0.0.1:8787",
     gateway_api_key_env: "",
+    workspace_roots: ["/tmp/qoder-workspace"],
     providers: {
       provider: {
         protocol: "openai",
@@ -297,6 +298,8 @@ test("serves the control page and persists a redacted configuration", async () =
   assert.equal(patchCalls, 2);
   assert.equal(JSON.parse(await fs.readFile(configPath, "utf8")).providers.provider.base_url, "https://api.ymeng.cc/v1");
   assert.equal(JSON.parse(await fs.readFile(configPath, "utf8")).qoder_patch.enabled, true);
+  assert.deepEqual(JSON.parse(saved.body).workspace_roots, ["/tmp/qoder-workspace"]);
+  assert.deepEqual(JSON.parse(await fs.readFile(configPath, "utf8")).workspace_roots, ["/tmp/qoder-workspace"]);
 
   await new Promise((resolve) => gateway.server.close(resolve));
   await fs.rm(directory, { recursive: true, force: true });
@@ -757,6 +760,68 @@ test("does not expose API keys in redacted output or errors", async () => {
   await new Promise((resolve) => gateway.server.close(resolve));
 });
 
+test("restores provider secrets from keychain storage after restart", async () => {
+  const secrets = new Map([["provider", "persisted-secret-value"]]);
+  const keychain = {
+    async read(provider) {
+      return secrets.get(provider);
+    },
+    async write(provider, secret) {
+      secrets.set(provider, secret);
+    },
+    async delete(provider) {
+      secrets.delete(provider);
+    }
+  };
+
+  let upstreamAuth;
+  const upstream = await startServer((req, res) => {
+    upstreamAuth = req.headers.authorization || req.headers["x-api-key"] || "";
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      id: "chatcmpl-keychain",
+      choices: [{ message: { role: "assistant", content: "ok" } }]
+    }));
+  });
+
+  const config = {
+    providers: {
+      provider: {
+        protocol: "openai",
+        base_url: `${upstream.baseUrl}/v1`,
+        api_key_env: "QODER_KEYCHAIN_TEST"
+      }
+    },
+    routes: { alias: { provider: "provider", model: "model" } }
+  };
+
+  const firstGateway = await startServer(createGateway(config, { keychain }));
+  try {
+    const response = await request(firstGateway.baseUrl, "/v1/chat/completions", {
+      model: "alias",
+      messages: [{ role: "user", content: "hello" }]
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(upstreamAuth, "Bearer persisted-secret-value");
+  } finally {
+    await new Promise((resolve) => firstGateway.server.close(resolve));
+  }
+
+  const updateGateway = await startServer(createGateway(config, { keychain }));
+  try {
+    const saved = await request(updateGateway.baseUrl, "/admin/provider-secret", {
+      provider: "provider",
+      api_key: "persisted-secret-value-2",
+      persist_keychain: true
+    }, {}, "PUT");
+    assert.equal(saved.statusCode, 200);
+    assert.equal(secrets.get("provider"), "persisted-secret-value-2");
+  } finally {
+    await new Promise((resolve) => updateGateway.server.close(resolve));
+    await new Promise((resolve) => upstream.server.close(resolve));
+  }
+});
+
 test("does not fall back after an authentication failure", async () => {
   let calls = 0;
   const upstream = await startServer((req, res) => {
@@ -1094,6 +1159,10 @@ test("fails closed when gateway API key configuration is missing", async () => {
   }));
   const response = await request(gateway.baseUrl, "/v1/models");
   assert.equal(response.statusCode, 401);
+  const health = await request(gateway.baseUrl, "/health");
+  assert.equal(health.statusCode, 200);
+  const recent = await request(gateway.baseUrl, "/admin/recent-requests");
+  assert.equal(recent.statusCode, 401);
   if (previous === undefined) delete process.env.QODER_GATEWAY_TEST_KEY;
   else process.env.QODER_GATEWAY_TEST_KEY = previous;
   await new Promise((resolve) => gateway.server.close(resolve));
@@ -1405,21 +1474,32 @@ test("Qoder V12 forwards safe tools and closes the ACP tool lifecycle", async ()
     "utf8"
   );
   assert.match(source, /PATCH_MARKER_V12/);
+  assert.match(source, /PATCH_MARKER_V19/);
   assert.match(source, /_localGatewayTools/);
   assert.match(source, /_executeLocalGatewayTool/);
   assert.match(source, /function_call_output/);
   assert.match(source, /sessionUpdate:initial\?"tool_call":"tool_call_update"/);
   assert.match(source, /rawOutput/);
   assert.match(source, /agent_thought_chunk/);
+  assert.match(source, /list_qoder_plugins/);
+  assert.match(source, /read_qoder_plugin_file/);
+  assert.match(source, /search_qoder_plugins/);
 });
 
-test("Qoder V13 allows research-sized local tool loops with a hard cap", async () => {
+test("Qoder V13/V18 bounds local tool loops for third-party models", async () => {
   const source = await fs.readFile(
     new URL("../src/core/qoder-patch.mjs", import.meta.url),
     "utf8"
   );
   assert.match(source, /PATCH_MARKER_V13/);
-  assert.match(source, /round<20/);
+  assert.match(source, /PATCH_MARKER_V18/);
+  assert.match(source, /MAX_TOOL_ROUNDS=8/);
+  assert.match(source, /MAX_TOOL_CALLS=24/);
+  assert.match(source, /MAX_DUPLICATE_TOOL_CALLS=2/);
+  assert.match(source, /_localGatewayToolSignature/);
+  assert.match(source, /_compactLocalGatewayToolOutput/);
+  assert.match(source, /Stopped a repeated local tool call/);
+  assert.match(source, /truncated by Qoder Bridge/);
 });
 
 test("Qoder V14 persists local gateway turns through ACP history", async () => {
@@ -1450,12 +1530,154 @@ test("Qoder V15 forwards selected context and reasoning runtime settings", async
   assert.match(source, /if \(!tokenCounts\.length\) return undefined/);
 });
 
+test("Qoder V16 closes the Quest state before persisting history", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V16/);
+  assert.match(source, /_finishLocalGatewayPrompt/);
+  assert.match(source, /terminalSent/);
+  const v16Start = source.indexOf("const LOCAL_GATEWAY_PROGRESS_V16");
+  const terminalIndex = source.indexOf(
+    'handleChatProgress("session/update",sessionId,requestId,{sessionId,update:{sessionUpdate:"notification"'
+    , v16Start);
+  const historyIndex = source.indexOf(
+    'await this._appendLocalGatewayHistory(sessionId,requestId,state'
+    , v16Start);
+  assert.ok(terminalIndex >= 0);
+  assert.ok(historyIndex > terminalIndex);
+  assert.match(
+    source,
+    /await this\.handleRequestError\("session\/prompt",\{sessionId,_meta:metadata\},error,"request"\);await this\._appendLocalGatewayHistory/
+  );
+});
+
+test("Qoder V17 repairs the V16 method boundary syntax", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  const v16Start = source.indexOf("const LOCAL_GATEWAY_PROGRESS_V16");
+  const v16End = source.indexOf("const LOCAL_GATEWAY_HANDLER_V12", v16Start);
+  const v16Template = source.slice(v16Start, v16End);
+  assert.match(source, /PATCH_MARKER_V17/);
+  assert.match(
+    v16Template,
+    /if\(done\)await this\._finishLocalGatewayPrompt\(sessionId,requestId,state\)}`;/
+  );
+  assert.doesNotMatch(v16Template, /state\)\}\}async _appendLocalGatewayHistory/);
+  assert.match(source, /fixedProgressBoundary/);
+});
+
+test("Qoder V18 replaces old installed handlers without losing runtime controls", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V18/);
+  assert.match(source, /local gateway V18 handler replacement point/);
+  assert.match(source, /runtimeConfig=metadata\?\.\["ai-coding\/model_config"\]\|\|\{\}/);
+  assert.match(source, /context_length:contextLength/);
+  assert.match(source, /this\.__qoderBridgeHistory/);
+  assert.match(source, /await this\._appendLocalGatewayHistory\(sessionId,requestId,history,cancelled\?"Cancelled":"Failed"\)/);
+});
+
+test("Qoder V21 skips empty workspace builtin command refreshes", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V21/);
+  assert.match(source, /Skipping builtin commands refresh for empty workspace/);
+  assert.match(source, /!n&&!r/);
+});
+
+
+
+test("Qoder V22 falls back to an available workspace folder", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V22/);
+  assert.match(source, /workspace folder fallback/);
+  assert.ok(source.includes('process.cwd&&process.cwd()!=="/"?process.cwd():process.env.HOME||"/"'));
+});
+
+test("Qoder V23 gives current workspace fallback a real file URI", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V23/);
+  assert.match(source, /current workspace fallback uri/);
+  assert.ok(source.includes('function m(){const e=a.window.activeTextEditor?.document.uri;if(e)return{index:0,uri:e,name:"Untitled"}'));
+  assert.ok(source.includes('return{index:0,uri:a.Uri.file(t),name:"Fallback"}'));
+  assert.ok(source.includes('name:"Fallback"'));
+});
+
+test("Qoder V24 initializes the language server with file URIs", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V24/);
+  assert.match(source, /initialize workspace uri fallback/);
+  assert.ok(source.includes('e.rootUri=t[0]?.uri?.toString()'));
+  assert.ok(source.includes('e.rootPath=t[0]?.uri?.fsPath'));
+  assert.ok(source.includes('uri:e.uri.toString()'));
+});
+
+test("Qoder V25 repairs conflicting V24 initialize variables", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V25/);
+  assert.match(source, /initialize workspace URI conflict repaired/);
+  assert.ok(source.includes('conflictingInitializePatch'));
+  assert.ok(source.includes('!source.includes(\'),r=t[0]?.uri?.toString();e.rootUri=r\')'));
+});
+
+test("Qoder V26 makes rootUri enumerable for Qoder initialize", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /PATCH_MARKER_V26/);
+  assert.match(source, /initialize enumerable rootUri/);
+  assert.ok(source.includes('Object.defineProperty(e,"rootUri"'));
+  assert.ok(source.includes('enumerable:!0'));
+  assert.ok(source.includes('uri:e.uri.toString()'));
+});
+
+test("Qoder V27 reuses duplicate tool results instead of aborting the session", async () => {
+  const source = await fs.readFile(
+    new URL("../src/core/qoder-patch.mjs", import.meta.url),
+    "utf8"
+  );
+  const handlerStart = source.indexOf("const LOCAL_GATEWAY_HANDLER_V12");
+  const handlerEnd = source.indexOf("_localGatewayTools(){", handlerStart);
+  const handler = source.slice(handlerStart, handlerEnd);
+  assert.match(source, /PATCH_MARKER_V27/);
+  assert.match(handler, /repeated tool call reused previous result/);
+  assert.match(handler, /toolResults=new Map/);
+  assert.match(handler, /await failPrompt\(/);
+  assert.match(handler, /tool loop limit reached after/);
+  assert.doesNotMatch(handler, /Stopped a repeated local tool call/);
+  assert.doesNotMatch(handler, /Stopped the local tool loop after/);
+  assert.doesNotMatch(handler, /handleRequestError\("session\/prompt"/);
+});
+
 test("local tool endpoint executes only the read-only allowlist", async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "qoder-local-tool-"));
   await fs.writeFile(path.join(workspace, "fixture.txt"), "local tool ok", "utf8");
+  await fs.mkdir(path.join(workspace, "folder"));
   const gateway = await startServer(createGateway({
     providers: {},
-    routes: {}
+    routes: {},
+    workspace_roots: [workspace]
   }));
   try {
     const read = await request(gateway.baseUrl, "/admin/local-tool", {
@@ -1473,6 +1695,58 @@ test("local tool endpoint executes only the read-only allowlist", async () => {
     const readPayload = JSON.parse(read.body);
     assert.equal(readPayload.ok, true);
     assert.match(readPayload.content, /local tool ok/);
+
+    const list = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "local-tool-list",
+      workspace_path: workspace,
+      tool_call: {
+        id: "call-list",
+        function: {
+          name: "list_files",
+          arguments: ""
+        }
+      }
+    });
+    assert.equal(list.statusCode, 200);
+    const listPayload = JSON.parse(list.body);
+    assert.equal(listPayload.ok, true);
+    assert.match(listPayload.content, /fixture\.txt/);
+    assert.match(listPayload.content, /folder/);
+    const listed = JSON.parse(listPayload.content);
+    assert.equal(listed.total, 2);
+    assert.equal(listed.truncated, false);
+
+    const missingPath = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "local-tool-empty-read",
+      workspace_path: workspace,
+      tool_call: {
+        id: "call-empty-read",
+        function: {
+          name: "read_file",
+          arguments: "  "
+        }
+      }
+    });
+    assert.equal(missingPath.statusCode, 200);
+    const missingPathPayload = JSON.parse(missingPath.body);
+    assert.equal(missingPathPayload.ok, false);
+    assert.equal(missingPathPayload.error, "tool path is required");
+
+    const malformed = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "local-tool-malformed",
+      workspace_path: workspace,
+      tool_call: {
+        id: "call-malformed",
+        function: {
+          name: "list_files",
+          arguments: "{"
+        }
+      }
+    });
+    assert.equal(malformed.statusCode, 200);
+    const malformedPayload = JSON.parse(malformed.body);
+    assert.equal(malformedPayload.ok, false);
+    assert.equal(malformedPayload.error, "tool arguments must be valid JSON");
 
     const shell = await request(gateway.baseUrl, "/admin/local-tool", {
       request_id: "local-tool-shell",
@@ -1512,4 +1786,278 @@ test("blocks workspace symlink escape in controlled tool mode", async () => {
   assert.match(result.content, /resolves outside/);
   await fs.rm(root, { recursive: true, force: true });
   await fs.rm(outside, { recursive: true, force: true });
+});
+
+test("discovers and reads Qoder plugin bundles from the plugin cache", async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), "qoder-plugin-cache-"));
+  const pluginRoot = path.join(cacheRoot, "qoder-marketplace", "prompt-design-studio", "1.1.0");
+  await fs.mkdir(path.join(pluginRoot, ".qoder-plugin"), { recursive: true });
+  await fs.mkdir(path.join(pluginRoot, "prompt-design-studio"), { recursive: true });
+  await fs.writeFile(
+    path.join(pluginRoot, ".qoder-plugin", "plugin.json"),
+    JSON.stringify({
+      name: "prompt-design-studio",
+      version: "1.1.0",
+      description: "Prompt Design Studio",
+      skills: ["./skills/prompt-design-studio"]
+    }),
+    "utf8"
+  );
+  await fs.writeFile(path.join(pluginRoot, "prompt-design-studio", "SKILL.md"), "# Prompt Design Studio\n", "utf8");
+  await fs.writeFile(
+    path.join(pluginRoot, "prompt-design-studio", "template-library.md"),
+    "# Templates\n",
+    "utf8"
+  );
+
+  const previous = process.env.QODER_PLUGIN_CACHE_ROOTS;
+  process.env.QODER_PLUGIN_CACHE_ROOTS = cacheRoot;
+  const gateway = await startServer(createGateway({
+    providers: {},
+    routes: {},
+    workspace_roots: [cacheRoot]
+  }));
+
+  try {
+    const list = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "plugin-list",
+      workspace_path: cacheRoot,
+      tool_call: {
+        id: "call-list-plugins",
+        function: {
+          name: "list_qoder_plugins",
+          arguments: "{}"
+        }
+      }
+    });
+    assert.equal(list.statusCode, 200);
+    const listPayload = JSON.parse(list.body);
+    assert.equal(listPayload.ok, true);
+    const pluginList = JSON.parse(listPayload.content);
+    assert.match(JSON.stringify(pluginList), /prompt-design-studio/);
+    assert.equal(pluginList.total, 1);
+    assert.deepEqual(pluginList.plugins[0].skill_paths, ["prompt-design-studio/SKILL.md"]);
+
+    const read = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "plugin-read",
+      workspace_path: cacheRoot,
+      tool_call: {
+        id: "call-read-plugin",
+        function: {
+          name: "read_qoder_plugin_file",
+          arguments: JSON.stringify({
+            plugin: "prompt-design-studio",
+            path: "SKILL.md"
+          })
+        }
+      }
+    });
+    assert.equal(read.statusCode, 200);
+    const readPayload = JSON.parse(read.body);
+    assert.equal(readPayload.ok, true);
+    assert.match(readPayload.content, /Prompt Design Studio/);
+
+    const readFullPath = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "plugin-read-full-path",
+      workspace_path: cacheRoot,
+      tool_call: {
+        id: "call-read-plugin-full-path",
+        function: {
+          name: "read_qoder_plugin_file",
+          arguments: JSON.stringify({
+            plugin: "prompt-design-studio",
+            path: "prompt-design-studio/template-library.md"
+          })
+        }
+      }
+    });
+    assert.equal(readFullPath.statusCode, 200);
+    const fullPathPayload = JSON.parse(readFullPath.body);
+    assert.equal(fullPathPayload.ok, true);
+    assert.match(fullPathPayload.content, /Templates/);
+
+    const search = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "plugin-search",
+      workspace_path: cacheRoot,
+      tool_call: {
+        id: "call-search-plugins",
+        function: {
+          name: "search_qoder_plugins",
+          arguments: JSON.stringify({ query: "Prompt" })
+        }
+      }
+    });
+    assert.equal(search.statusCode, 200);
+    const searchPayload = JSON.parse(search.body);
+    assert.equal(searchPayload.ok, true);
+    assert.match(searchPayload.content, /prompt-design-studio/);
+  } finally {
+    process.env.QODER_PLUGIN_CACHE_ROOTS = previous;
+    await new Promise((resolve) => gateway.server.close(resolve));
+    await fs.rm(cacheRoot, { recursive: true, force: true });
+  }
+});
+
+test("rejects plugin path escapes outside the plugin bundle", async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), "qoder-plugin-cache-"));
+  const pluginRoot = path.join(cacheRoot, "qoder-marketplace", "prompt-design-studio", "1.1.0");
+  await fs.mkdir(path.join(pluginRoot, ".qoder-plugin"), { recursive: true });
+  await fs.writeFile(
+    path.join(pluginRoot, ".qoder-plugin", "plugin.json"),
+    JSON.stringify({ name: "prompt-design-studio", version: "1.1.0" }),
+    "utf8"
+  );
+  const policy = createToolPolicy({
+    qoderPluginRoots: [cacheRoot],
+    executionMode: "execute"
+  });
+  const result = await executeToolCall(policy, {
+    id: "call-escape",
+    type: "function",
+    function: {
+      name: "read_qoder_plugin_file",
+      arguments: JSON.stringify({ plugin: "prompt-design-studio", path: "../../secret.txt" })
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.content, /stay inside the plugin directory/);
+  await fs.rm(cacheRoot, { recursive: true, force: true });
+});
+
+test("rejects local tools when workspace roots are missing or outside the allowlist", async () => {
+  const allowed = await fs.mkdtemp(path.join(os.tmpdir(), "qoder-allowed-root-"));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), "qoder-outside-root-"));
+  await fs.writeFile(path.join(allowed, "inside.txt"), "inside", "utf8");
+  await fs.writeFile(path.join(outside, "secret.txt"), "secret", "utf8");
+
+  const unconfigured = await startServer(createGateway({
+    providers: {},
+    routes: {}
+  }));
+  const missingRoots = await request(unconfigured.baseUrl, "/admin/local-tool", {
+    request_id: "missing-roots",
+    workspace_path: allowed,
+    tool_call: {
+      id: "call-missing-roots",
+      function: {
+        name: "read_file",
+        arguments: JSON.stringify({ path: "inside.txt" })
+      }
+    }
+  });
+  assert.equal(missingRoots.statusCode, 200);
+  const missingPayload = JSON.parse(missingRoots.body);
+  assert.equal(missingPayload.ok, false);
+  assert.equal(missingPayload.code, "workspace_roots_unconfigured");
+  await new Promise((resolve) => unconfigured.server.close(resolve));
+
+  const gateway = await startServer(createGateway({
+    providers: {},
+    routes: {},
+    workspace_roots: [allowed]
+  }));
+  try {
+    const nestedOk = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "nested-ok",
+      workspace_path: path.join(allowed, "nested-does-not-need-to-exist"),
+      tool_call: {
+        id: "call-nested",
+        function: {
+          name: "list_files",
+          arguments: JSON.stringify({ path: "." })
+        }
+      }
+    });
+    assert.equal(nestedOk.statusCode, 200);
+    assert.equal(JSON.parse(nestedOk.body).ok, false);
+
+    const denied = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "outside-root",
+      workspace_path: outside,
+      tool_call: {
+        id: "call-outside",
+        function: {
+          name: "read_file",
+          arguments: JSON.stringify({ path: "secret.txt" })
+        }
+      }
+    });
+    assert.equal(denied.statusCode, 200);
+    const deniedPayload = JSON.parse(denied.body);
+    assert.equal(deniedPayload.ok, false);
+    assert.equal(deniedPayload.code, "workspace_not_allowed");
+
+    const allowedRead = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "allowed-root",
+      workspace_path: allowed,
+      tool_call: {
+        id: "call-allowed",
+        function: {
+          name: "read_file",
+          arguments: JSON.stringify({ path: "inside.txt" })
+        }
+      }
+    });
+    assert.equal(allowedRead.statusCode, 200);
+    assert.equal(JSON.parse(allowedRead.body).ok, true);
+  } finally {
+    await new Promise((resolve) => gateway.server.close(resolve));
+    await fs.rm(allowed, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("allows plugin cache tools without a workspace folder", async () => {
+  const cacheRoot = await fs.mkdtemp(path.join(os.tmpdir(), "qoder-plugin-empty-ws-"));
+  const pluginRoot = path.join(cacheRoot, "qoder-marketplace", "architecture-visual", "1.0.0");
+  await fs.mkdir(path.join(pluginRoot, ".qoder-plugin"), { recursive: true });
+  await fs.writeFile(
+    path.join(pluginRoot, ".qoder-plugin", "plugin.json"),
+    JSON.stringify({ name: "architecture-visual", version: "1.0.0", description: "Architecture visual" }),
+    "utf8"
+  );
+  const previous = process.env.QODER_PLUGIN_CACHE_ROOTS;
+  process.env.QODER_PLUGIN_CACHE_ROOTS = cacheRoot;
+  const gateway = await startServer(createGateway({
+    providers: {},
+    routes: {},
+    workspace_roots: []
+  }));
+  try {
+    const missingWorkspace = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "empty-ws-list",
+      workspace_path: "",
+      tool_call: {
+        id: "call-empty-ws",
+        function: {
+          name: "list_files",
+          arguments: "{}"
+        }
+      }
+    });
+    assert.equal(missingWorkspace.statusCode, 200);
+    const missingPayload = JSON.parse(missingWorkspace.body);
+    assert.equal(missingPayload.ok, false);
+    assert.equal(missingPayload.code, "workspace_required");
+    assert.match(missingPayload.error, /open a folder in Qoder/);
+
+    const plugins = await request(gateway.baseUrl, "/admin/local-tool", {
+      request_id: "empty-ws-plugins",
+      tool_call: {
+        id: "call-plugins",
+        function: {
+          name: "list_qoder_plugins",
+          arguments: JSON.stringify({ query: "Architecture" })
+        }
+      }
+    });
+    assert.equal(plugins.statusCode, 200);
+    const pluginPayload = JSON.parse(plugins.body);
+    assert.equal(pluginPayload.ok, true);
+    assert.match(pluginPayload.content, /architecture-visual/);
+  } finally {
+    process.env.QODER_PLUGIN_CACHE_ROOTS = previous;
+    await new Promise((resolve) => gateway.server.close(resolve));
+    await fs.rm(cacheRoot, { recursive: true, force: true });
+  }
 });

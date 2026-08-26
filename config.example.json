@@ -2,6 +2,7 @@
   "listen": "127.0.0.1:8787",
   "gateway_api_key_env": "",
   "max_body_bytes": 8388608,
+  "workspace_roots": [],
   "qoder_patch": {
     "enabled": true,
     "gateway_url": "http://127.0.0.1:8787"
